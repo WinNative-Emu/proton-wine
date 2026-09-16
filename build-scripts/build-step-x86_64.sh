@@ -292,8 +292,23 @@ do
     # under Box64 the guest's Vulkan calls are wrapped out to the device's native loader, so the
     # ICD the compositor presents through is the aarch64 Wayland Turnip, same as the arm64ec layer.
     if [ -f "$deps/lib/libwayland-client.so" ]; then
-      cp -n "$deps/lib"/libwayland-client.so "$deps/lib"/libwayland-egl.so \
-            "$deps/lib"/libxkbcommon.so "$deps/lib"/libxkbregistry.so "$OUTPUT_DIR/lib/" 2>/dev/null || true
+      # The whole transitive closure, not just the four winewayland links against: the emulated
+      # x86_64 loader cannot fall back on the container image, whose copies of these are aarch64.
+      # libwayland-client needs libffi and libandroid-support; libxkbregistry needs libxml2, which
+      # pulls in icu, iconv, zlib and libc++.
+      #
+      # They go in a subdirectory the launcher hands to Box64 alone, never on LD_LIBRARY_PATH:
+      # libc++_shared.so and libz.so.1 are also linked by the native aarch64 box64 binary, which
+      # fails to start if the loader hands it these x86_64 copies instead.
+      mkdir -p "$OUTPUT_DIR/lib/wayland-x86_64"
+      for _l in libwayland-client.so libwayland-egl.so libxkbcommon.so libxkbregistry.so \
+                libandroid-support.so libffi.so libxml2.so.16 libicuuc.so.78 libicudata.so.78 \
+                libiconv.so libz.so.1 libc++_shared.so; do
+        [ -f "$deps/lib/$_l" ] \
+          || { echo "ERROR: x86_64 runtime dep '$_l' missing from $deps/lib" >&2; exit 1; }
+        rm -f "$OUTPUT_DIR/lib/$_l"
+        cp "$deps/lib/$_l" "$OUTPUT_DIR/lib/wayland-x86_64/"
+      done
       echo "Bundled x86_64 wayland/xkb runtime libs"
     fi
     _WLD="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/android/wayland-deps/usr/lib"
