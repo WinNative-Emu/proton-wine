@@ -297,7 +297,13 @@ static struct desktop *create_desktop( const struct unicode_str *name, unsigned 
             desktop->taskman_window = NULL;
             desktop->global_hooks = NULL;
             desktop->close_timeout = NULL;
-            desktop->close_timeout_val = 0;
+            /* Upstream Wine's 1 s grace before an unused desktop closes. This tree had 0 here
+             * (only Proton's Steam helper ever raised it, SET_USER_OBJECT_SET_CLOSE_TIMEOUT via
+             * NtUserSetObjectInformation index 1000): on Wayland the zero grace closed
+             * explorer's desktop ~0.25 s into a 32-bit game's startup thread churn (Half-Life 2)
+             * and killed win32u's auto-spawned "explorer.exe /desktop" during the first-launch
+             * prefix update. Still overridable through index 1000 exactly as before. */
+            desktop->close_timeout_val = -TICKS_PER_SEC;
             desktop->foreground_input = NULL;
             desktop->foreground_pid = 0;
             desktop->users = 0;

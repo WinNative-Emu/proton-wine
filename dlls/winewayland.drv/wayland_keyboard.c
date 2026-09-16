@@ -604,6 +604,9 @@ static BOOL find_xkb_layout_variant(const char *name, const char **layout, const
 {
     struct rxkb_layout *iter;
 
+    /* No registry (see wayland_keyboard_init): the caller falls back to "us". */
+    if (!rxkb_context) return FALSE;
+
     for (iter = rxkb_layout_first(rxkb_context); iter; iter = rxkb_layout_next(iter))
     {
         const char *desc = rxkb_layout_get_description(iter);
@@ -900,11 +903,17 @@ void wayland_keyboard_init(struct wl_keyboard *wl_keyboard)
     struct wayland_keyboard *keyboard = &process_wayland.keyboard;
     struct xkb_context *xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
 
+    /* The registry only names layouts for the HKL (find_xkb_layout_variant); the keymap itself
+     * comes from the compositor (xkb_keymap_new_from_string). On the Bannerlator imagefs the
+     * bundled libxkbregistry's default include path is Termux's private xkeyboard-config dir,
+     * unreadable by the app, so parsing the ruleset fails every time; returning here left the
+     * wl_keyboard listener uninstalled and no key ever reached Wine. Go on without a registry. */
     if (!(rxkb_context = rxkb_context_new(RXKB_CONTEXT_NO_FLAGS))
             || !rxkb_context_parse_default_ruleset(rxkb_context))
     {
-        ERR("Failed to parse default Xkb ruleset\n");
-        return;
+        WARN("Xkb registry unavailable, layout names default to us\n");
+        if (rxkb_context) rxkb_context_unref(rxkb_context);
+        rxkb_context = NULL;
     }
 
     if (!xkb_context)

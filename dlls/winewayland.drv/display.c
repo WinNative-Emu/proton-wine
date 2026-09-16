@@ -27,14 +27,99 @@
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
 #include "waylanddrv.h"
+#include "wayland_edid.h"
 
 #include "wine/debug.h"
 
 #include "ntuser.h"
 
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
+
+/* The screen's luminance, from the Bannerlator app (per session). With none of the three
+ * variables set the monitor gets no EDID, as before. */
+static struct wayland_edid_hdr edid_hdr = {-1, -1, -1};
+static BOOL edid_hdr_given;
+/* DXVK_HDR=1: the app switched HDR output on for this session, read exactly as Proton's X11
+ * driver reads it, so both drivers gate Windows advanced colour on the same thing. */
+static BOOL hdr_output_enabled;
+/* The EDID names a real peak luminance, so it describes an HDR10 screen. An SDR screen gets no
+ * EDID from us at all, and must never be able to claim advanced colour. */
+static BOOL edid_hdr_has_peak;
+
+static void edid_hdr_init(void)
+{
+    static const char *names[] =
+    {
+        "BANNER_WAYLAND_HDR_MAX_NITS", "BANNER_WAYLAND_HDR_MAX_AVG_NITS", "BANNER_WAYLAND_HDR_MIN_NITS"
+    };
+    double *values[] = {&edid_hdr.max_nits, &edid_hdr.max_avg_nits, &edid_hdr.min_nits};
+    unsigned char max_code, avg_code, min_code;
+    char said[3][48];
+    const char *env;
+    int i;
+
+    hdr_output_enabled = (env = getenv("DXVK_HDR")) && *env == '1';
+
+    for (i = 0; i < 3; i++)
+    {
+        if (!(env = getenv(names[i]))) continue;
+        if (wayland_edid_parse_nits(env, values[i])) edid_hdr_given = TRUE;
+        else MESSAGE("winewayland: %s=%s is not a number of nits, ignoring it\n", names[i], env);
+    }
+    if (!edid_hdr_given) return;
+
+    max_code = wayland_edid_max_luminance_code(edid_hdr.max_nits);
+    edid_hdr_has_peak = max_code != 0;
+    avg_code = wayland_edid_max_luminance_code(edid_hdr.max_avg_nits);
+    min_code = wayland_edid_min_luminance_code(edid_hdr.min_nits, max_code);
+    if (max_code) snprintf(said[0], sizeof(said[0]), "%.4g (EDID %.1f)", edid_hdr.max_nits,
+                           wayland_edid_max_luminance_value(max_code));
+    else strcpy(said[0], "not given");
+    if (avg_code) snprintf(said[1], sizeof(said[1]), "%.4g (EDID %.1f)", edid_hdr.max_avg_nits,
+                           wayland_edid_max_luminance_value(avg_code));
+    else strcpy(said[1], "not given");
+    if (min_code) snprintf(said[2], sizeof(said[2]), "%.4g (EDID %.4f)", edid_hdr.min_nits,
+                           wayland_edid_min_luminance_value(min_code, max_code));
+    else if (edid_hdr.min_nits >= 0) snprintf(said[2], sizeof(said[2]), "%.4g (EDID: not given%s)",
+                                              edid_hdr.min_nits, max_code ? "" : ", needs a max");
+    else strcpy(said[2], "not given");
+    MESSAGE("winewayland: HDR10 monitor description (EDID) for Windows: max %s, max frame-average %s, "
+            "min %s nits\n", said[0], said[1], said[2]);
+}
+
+static const struct wayland_edid_hdr *get_edid_hdr(void)
+{
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+
+    pthread_once(&once, edid_hdr_init);
+    return edid_hdr_given ? &edid_hdr : NULL;
+}
+
+/* Which process described the screen, and what win32u was handed: once per process, and again
+ * if it changes. win32u serializes display updates, so no lock is needed here. */
+static void report_edid_handoff(const char *output_name, const struct wayland_output_mode *mode,
+                                UINT edid_len, BOOL hdr_enabled)
+{
+    static UINT last_len = ~0u;
+    static int last_width, last_height, last_hdr = -1;
+
+    if (edid_len == last_len && mode->width == last_width && mode->height == last_height &&
+        last_hdr == (int)hdr_enabled) return;
+    last_len = edid_len;
+    last_width = mode->width;
+    last_height = mode->height;
+    last_hdr = hdr_enabled;
+
+    MESSAGE("winewayland: %s (pid %04x) built the screen's EDID for output %s (%dx%d) and hands "
+            "win32u %u bytes, advanced colour %s\n", process_name ? process_name : "?",
+            (UINT)GetCurrentProcessId(), output_name ? output_name : "?", mode->width, mode->height,
+            edid_len, hdr_enabled ? "on (DXVK_HDR=1, HDR10 EDID)" :
+            hdr_output_enabled ? "off (the EDID names no peak luminance)" : "off (DXVK_HDR is not 1)");
+}
 
 struct output_info
 {
@@ -208,7 +293,10 @@ static void wayland_add_device_source(const struct gdi_device_manager *device_ma
 static void wayland_add_device_monitor(const struct gdi_device_manager *device_manager,
                                        void *param, struct output_info *output_info)
 {
+    struct wayland_output_mode *mode = output_info->output->current_mode;
+    const struct wayland_edid_hdr *hdr = get_edid_hdr();
     struct gdi_monitor monitor = {0};
+    unsigned char edid[WAYLAND_EDID_SIZE];
 
     SetRect(&monitor.rc_monitor, output_info->x, output_info->y,
             output_info->x + output_info->output->current_mode->width,
@@ -217,8 +305,22 @@ static void wayland_add_device_monitor(const struct gdi_device_manager *device_m
     /* We don't have a direct way to get the work area in Wayland. */
     monitor.rc_work = monitor.rc_monitor;
 
-    TRACE("name=%s rc_monitor=rc_work=%s\n",
-          output_info->output->name, wine_dbgstr_rect(&monitor.rc_monitor));
+    /* An HDR10 screen whose luminance the app handed over: describe it, so DXGI reports its
+     * real peak, frame-average and black level instead of DXVK's stand-in values. */
+    if (hdr)
+    {
+        monitor.edid_len = wayland_edid_build(edid, hdr, mode->width, mode->height, mode->refresh);
+        monitor.edid = edid;
+        /* And tell Windows the screen is in HDR, so a game's own HDR option stops being greyed
+         * out: DisplayConfig reports advanced colour for this monitor. Both halves are needed -
+         * the session's HDR switch is on, and this monitor really is described as HDR10. */
+        monitor.hdr_enabled = hdr_output_enabled && edid_hdr_has_peak;
+        report_edid_handoff(output_info->output->name, mode, monitor.edid_len, monitor.hdr_enabled);
+    }
+
+    TRACE("name=%s rc_monitor=rc_work=%s edid_len=%u hdr_enabled=%d\n",
+          output_info->output->name, wine_dbgstr_rect(&monitor.rc_monitor), monitor.edid_len,
+          monitor.hdr_enabled);
 
     device_manager->add_monitor(&monitor, param);
 }

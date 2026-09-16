@@ -45,6 +45,29 @@ export GSTREAMER_LIBS="-L$deps/lib -lgstgl-1.0 -lgstapp-1.0 -lgstvideo-1.0 -lgst
 export FFMPEG_CFLAGS="-I$deps/include/libavutil -I$deps/include/libavcodec -I$deps/include/libavformat"
 export FFMPEG_LIBS="-L$deps/lib -lavutil -lavcodec -lavformat"
 
+# winewayland.drv's build deps. The bionic aarch64 libs and headers are vendored in
+# android/wayland-deps; they are staged into $deps below and the flags are set explicitly so
+# configure uses them directly rather than pkg-config, whose .pc prefix points at a Termux path
+# that does not exist on this host. The host wayland-scanner is found on PATH.
+export WAYLAND_CLIENT_CFLAGS="-I$deps/include"
+export WAYLAND_CLIENT_LIBS="-L$deps/lib -lwayland-client"
+export WAYLAND_EGL_CFLAGS="-I$deps/include"
+export WAYLAND_EGL_LIBS="-L$deps/lib -lwayland-egl"
+export XKBCOMMON_CFLAGS="-I$deps/include"
+export XKBCOMMON_LIBS="-L$deps/lib -lxkbcommon"
+export XKBREGISTRY_CFLAGS="-I$deps/include"
+export XKBREGISTRY_LIBS="-L$deps/lib -lxkbregistry"
+
+# Stage the vendored wayland/xkb deps into the sysroot. Idempotent, and skipped when the
+# directory is absent so a checkout without them still builds the X11-only path.
+_WLD="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/android/wayland-deps/usr"
+if [ -d "$_WLD" ]; then
+  mkdir -p "$deps/lib/pkgconfig" "$deps/include"
+  cp -rn "$_WLD/lib/." "$deps/lib/" 2>/dev/null || true
+  cp -rn "$_WLD/include/." "$deps/include/" 2>/dev/null || true
+  echo "Staged vendored wayland/xkb deps into $deps"
+fi
+
 for arg in "$@"
 do
   if [ "$arg" == "--enable-16kb-pages" ];
@@ -132,7 +155,7 @@ do
       --without-v4l2 \
       --without-vosk \
       --with-vulkan \
-      --without-wayland \
+      --with-wayland \
       --without-xcomposite \
       --without-xfixes \
       --without-xinerama \
@@ -272,5 +295,39 @@ do
     ln -sf ../lib/wine/aarch64-unix/wine-preloader "$install_dir/bin/wine-preloader"
     echo "Wine loader symlinks:"
     ls -la "$OUTPUT_DIR/bin/wine" "$OUTPUT_DIR/bin/wine-preloader"
+
+    # Ship winewayland.so's runtime dependencies and the Wayland-capable Turnips, so a Wayland
+    # session never depends on what the container image happens to carry. Vendored bionic aarch64
+    # libraries from android/wayland-deps; see that directory's TURNIP.md for where each came from.
+    _WLD="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/android/wayland-deps/usr/lib"
+    if [ -d "$_WLD" ]; then
+      cp -n "$_WLD"/libwayland-client.so "$_WLD"/libwayland-egl.so \
+            "$_WLD"/libxkbcommon.so "$_WLD"/libxkbregistry.so "$OUTPUT_DIR/lib/" 2>/dev/null || true
+      [ -f "$_WLD"/libdrm.so ] && cp -n "$_WLD"/libdrm.so "$OUTPUT_DIR/lib/" 2>/dev/null || true
+      echo "Bundled wayland/xkb runtime libs"
+      # Every Turnip variant ships or the build fails: a layer missing one would silently put an
+      # Adreno 710/720 or 8xx device on the plain driver, which cannot create a device there.
+      if [ -f "$_WLD"/libvulkan_freedreno_wayland.so ]; then
+        mkdir -p "$OUTPUT_DIR/share/vulkan/icd.d"
+        for v in "" _a7xx _a8xx _a8xx_perf _a8xx_gen8 _a8xx_smxz _a8xx_white _a8xx_upstream; do
+          [ -f "$_WLD/libvulkan_freedreno_wayland$v.so" ] \
+            || { echo "ERROR: Wayland Turnip variant '$v' missing from android/wayland-deps" >&2; exit 1; }
+          cp "$_WLD/libvulkan_freedreno_wayland$v.so" "$OUTPUT_DIR/lib/"
+          cp "$_WLD/../share/vulkan/icd.d/wayland_turnip$v.json" "$OUTPUT_DIR/share/vulkan/icd.d/"
+        done
+        echo "Bundled the Wayland Turnip ICDs"
+      fi
+      # xkeyboard-config for the bundled libxkbregistry, so keyboard layouts get their real names.
+      if [ -f "$_WLD"/../share/X11/xkb/rules/evdev.xml ]; then
+        mkdir -p "$OUTPUT_DIR/share/X11"
+        cp -r "$_WLD"/../share/X11/xkb "$OUTPUT_DIR/share/X11/"
+        echo "Bundled xkeyboard-config"
+      fi
+      # Mesa's EGL (Wayland platform) and Zink, from the same build as those Turnips.
+      if [ -f "$_WLD"/libEGL.so.1 ]; then
+        cp "$_WLD"/libEGL.so.1 "$_WLD"/libGLESv2.so.2 "$_WLD"/libgallium-*.so "$OUTPUT_DIR/lib/"
+        echo "Bundled Mesa EGL + Zink"
+      fi
+    fi
   fi
 done

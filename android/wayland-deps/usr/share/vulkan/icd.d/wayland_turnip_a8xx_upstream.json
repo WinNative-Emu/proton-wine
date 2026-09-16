@@ -1,0 +1,8 @@
+{
+    "ICD": {
+        "api_version": "1.4.362",
+        "library_arch": "64",
+        "library_path": "../../../lib/libvulkan_freedreno_wayland_a8xx_upstream.so"
+    },
+    "file_format_version": "1.0.1"
+}

@@ -420,7 +420,13 @@ static void vulkan_instance_insert_object( struct vulkan_instance *instance, str
     if (impl->objects.compare)
     {
         pthread_rwlock_wrlock( &impl->objects_lock );
-        rb_put( &impl->objects, &obj->host_handle, &obj->entry );
+        /* rb_put refuses a duplicate key and inserts nothing, so a stale entry would keep
+         * shadowing the new object and host-to-client lookups would hand out a freed handle.
+         * The driver reuses host handles as soon as an object is destroyed, so this is reachable
+         * whenever something is torn down and rebuilt. Say so rather than fail silently; evicting
+         * the stale entry here is not safe, its owner still expects to remove it later. */
+        if (rb_put( &impl->objects, &obj->host_handle, &obj->entry ))
+            ERR( "host handle 0x%s is already registered, the new object is not\n", wine_dbgstr_longlong( obj->host_handle ) );
         pthread_rwlock_unlock( &impl->objects_lock );
     }
 }
@@ -999,10 +1005,16 @@ static void win32u_vkDestroyDevice( VkDevice client_device, const VkAllocationCa
 
     if (!device) return;
 
-    device->p_vkDestroyDevice( device->host.device, NULL /* pAllocator */ );
+    /* Drop our bookkeeping before the driver frees the host device: it reuses host handles
+     * immediately, so a device created right afterwards can land on the same handle while these
+     * entries are still in the table. */
     for (i = 0; i < device->queue_count; i++)
         instance->p_remove_object( instance, &device->queues[i].obj );
     instance->p_remove_object( instance, &device->obj );
+
+    ERR( "destroying device %p, host_device %p\n", device, device->host.device );
+    device->p_vkDestroyDevice( device->host.device, NULL /* pAllocator */ );
+    ERR( "destroyed device %p\n", device );
 
     free( device );
 }

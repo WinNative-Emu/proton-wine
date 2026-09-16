@@ -2,7 +2,7 @@ MODULE    = amd_ags_x64.dll
 UNIXLIB   = amd_ags_x64.so
 UNIX_CFLAGS = $(DRM_CFLAGS)
 UNIX_LIBS = $(DRM_LIBS) $(DRMAMDGPU_LIBS)
-IMPORTS   = version vulkan-1 user32
+IMPORTS   = version vulkan-1 user32 advapi32
 IMPORTLIB = amd_ags_x64
 
 EXTRADLLFLAGS = -mno-cygwin
