@@ -45,6 +45,19 @@ export GSTREAMER_LIBS="-L$deps/lib -lgstgl-1.0 -lgstapp-1.0 -lgstvideo-1.0 -lgst
 export FFMPEG_CFLAGS="-I$deps/include/libavutil -I$deps/include/libavcodec -I$deps/include/libavformat"
 export FFMPEG_LIBS="-L$deps/lib -lavutil -lavcodec -lavformat"
 
+# winewayland.drv's build deps. The x86_64 Termux sysroot already carries bionic x86_64 builds of
+# the Wayland client and xkb libraries, so unlike the arm64ec build nothing has to be vendored.
+# The flags are set explicitly because pkg-config's .pc prefix points at a Termux path that does
+# not exist on this host. The host wayland-scanner is found on PATH.
+export WAYLAND_CLIENT_CFLAGS="-I$deps/include"
+export WAYLAND_CLIENT_LIBS="-L$deps/lib -lwayland-client"
+export WAYLAND_EGL_CFLAGS="-I$deps/include"
+export WAYLAND_EGL_LIBS="-L$deps/lib -lwayland-egl"
+export XKBCOMMON_CFLAGS="-I$deps/include"
+export XKBCOMMON_LIBS="-L$deps/lib -lxkbcommon"
+export XKBREGISTRY_CFLAGS="-I$deps/include"
+export XKBREGISTRY_LIBS="-L$deps/lib -lxkbregistry"
+
 for arg in "$@"
 do
   if [ "$arg" == "--enable-16kb-pages" ];
@@ -132,7 +145,7 @@ do
       --without-v4l2 \
       --without-vosk \
       --with-vulkan \
-      --without-wayland \
+      --with-wayland \
       --without-xcomposite \
       --without-xfixes \
       --without-xinerama \
@@ -273,5 +286,32 @@ do
     ln -sf ../lib/wine/x86_64-unix/wine-preloader "$install_dir/bin/wine-preloader"
     echo "Wine loader symlinks:"
     ls -la "$OUTPUT_DIR/bin/wine" "$OUTPUT_DIR/bin/wine-preloader"
+
+    # Ship winewayland.so's runtime dependencies. The Wayland client and xkb libraries must match
+    # the emulated x86_64 Wine, so they come from the x86_64 sysroot. The Vulkan driver must not:
+    # under Box64 the guest's Vulkan calls are wrapped out to the device's native loader, so the
+    # ICD the compositor presents through is the aarch64 Wayland Turnip, same as the arm64ec layer.
+    if [ -f "$deps/lib/libwayland-client.so" ]; then
+      cp -n "$deps/lib"/libwayland-client.so "$deps/lib"/libwayland-egl.so \
+            "$deps/lib"/libxkbcommon.so "$deps/lib"/libxkbregistry.so "$OUTPUT_DIR/lib/" 2>/dev/null || true
+      echo "Bundled x86_64 wayland/xkb runtime libs"
+    fi
+    _WLD="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/android/wayland-deps/usr/lib"
+    if [ -f "$_WLD/libvulkan_freedreno_wayland.so" ]; then
+      mkdir -p "$OUTPUT_DIR/share/vulkan/icd.d"
+      for v in "" _a7xx _a8xx _a8xx_perf _a8xx_gen8 _a8xx_smxz _a8xx_white _a8xx_upstream; do
+        [ -f "$_WLD/libvulkan_freedreno_wayland$v.so" ] \
+          || { echo "ERROR: Wayland Turnip variant '$v' missing from android/wayland-deps" >&2; exit 1; }
+        cp "$_WLD/libvulkan_freedreno_wayland$v.so" "$OUTPUT_DIR/lib/"
+        cp "$_WLD/../share/vulkan/icd.d/wayland_turnip$v.json" "$OUTPUT_DIR/share/vulkan/icd.d/"
+      done
+      [ -f "$_WLD/libdrm.so" ] && cp -n "$_WLD/libdrm.so" "$OUTPUT_DIR/lib/" 2>/dev/null || true
+      echo "Bundled the Wayland Turnip ICDs"
+    fi
+    if [ -f "$_WLD/../share/X11/xkb/rules/evdev.xml" ]; then
+      mkdir -p "$OUTPUT_DIR/share/X11"
+      cp -r "$_WLD/../share/X11/xkb" "$OUTPUT_DIR/share/X11/"
+      echo "Bundled xkeyboard-config"
+    fi
   fi
 done
