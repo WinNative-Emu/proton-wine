@@ -287,42 +287,16 @@ do
     echo "Wine loader symlinks:"
     ls -la "$OUTPUT_DIR/bin/wine" "$OUTPUT_DIR/bin/wine-preloader"
 
-    # Ship winewayland.so's runtime dependencies. The Wayland client and xkb libraries must match
-    # the emulated x86_64 Wine, so they come from the x86_64 sysroot. The Vulkan driver must not:
-    # under Box64 the guest's Vulkan calls are wrapped out to the device's native loader, so the
-    # ICD the compositor presents through is the aarch64 Wayland Turnip, same as the arm64ec layer.
-    if [ -f "$deps/lib/libwayland-client.so" ]; then
-      # The whole transitive closure, not just the four winewayland links against: the emulated
-      # x86_64 loader cannot fall back on the container image, whose copies of these are aarch64.
-      # libwayland-client needs libffi and libandroid-support; libxkbregistry needs libxml2, which
-      # pulls in icu, iconv, zlib and libc++.
-      #
-      # They go in a subdirectory the launcher hands to Box64 alone, never on LD_LIBRARY_PATH:
-      # libc++_shared.so and libz.so.1 are also linked by the native aarch64 box64 binary, which
-      # fails to start if the loader hands it these x86_64 copies instead.
-      mkdir -p "$OUTPUT_DIR/lib/wayland-x86_64"
-      for _l in libwayland-client.so libwayland-egl.so libxkbcommon.so libxkbregistry.so \
-                libandroid-support.so libffi.so libxml2.so.16 libicuuc.so.78 libicudata.so.78 \
-                libiconv.so libz.so.1 libc++_shared.so; do
-        [ -f "$deps/lib/$_l" ] \
-          || { echo "ERROR: x86_64 runtime dep '$_l' missing from $deps/lib" >&2; exit 1; }
-        rm -f "$OUTPUT_DIR/lib/$_l"
-        cp "$deps/lib/$_l" "$OUTPUT_DIR/lib/wayland-x86_64/"
-      done
-      echo "Bundled x86_64 wayland/xkb runtime libs"
-    fi
+    # No Wayland in this layer. WinNative offers Wayland only to a layer carrying
+    # lib/wine/aarch64-unix/winewayland.so (WineWaylandSupport.isWaylandCapable), because the
+    # x86_64 winewayland.so cannot dlopen the aarch64 Wayland Turnip a game has to present
+    # through. Shipping the driver and its runtime closure here only added ~160 MB no session
+    # can reach, so drop what the wine install left behind.
+    rm -f "$OUTPUT_DIR/lib/wine/x86_64-unix/winewayland.so" \
+          "$OUTPUT_DIR/lib/wine/x86_64-windows/winewayland.drv" \
+          "$OUTPUT_DIR/lib/wine/i386-windows/winewayland.drv"
+
     _WLD="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/android/wayland-deps/usr/lib"
-    if [ -f "$_WLD/libvulkan_freedreno_wayland.so" ]; then
-      mkdir -p "$OUTPUT_DIR/share/vulkan/icd.d"
-      for v in "" _a7xx _a8xx _a8xx_perf _a8xx_gen8 _a8xx_smxz _a8xx_white _a8xx_upstream; do
-        [ -f "$_WLD/libvulkan_freedreno_wayland$v.so" ] \
-          || { echo "ERROR: Wayland Turnip variant '$v' missing from android/wayland-deps" >&2; exit 1; }
-        cp "$_WLD/libvulkan_freedreno_wayland$v.so" "$OUTPUT_DIR/lib/"
-        cp "$_WLD/../share/vulkan/icd.d/wayland_turnip$v.json" "$OUTPUT_DIR/share/vulkan/icd.d/"
-      done
-      [ -f "$_WLD/libdrm.so" ] && cp -n "$_WLD/libdrm.so" "$OUTPUT_DIR/lib/" 2>/dev/null || true
-      echo "Bundled the Wayland Turnip ICDs"
-    fi
     if [ -f "$_WLD/../share/X11/xkb/rules/evdev.xml" ]; then
       mkdir -p "$OUTPUT_DIR/share/X11"
       cp -r "$_WLD/../share/X11/xkb" "$OUTPUT_DIR/share/X11/"
